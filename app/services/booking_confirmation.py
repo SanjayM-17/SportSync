@@ -6,7 +6,7 @@ from uuid import uuid4
 
 from app.engines.conflict_engine import (
     detect_conflicts,
-    is_campus_time_available
+    is_facility_time_available
 )
 
 from app.engines.os_engine import get_resource_manager
@@ -17,9 +17,7 @@ resource_manager = get_resource_manager()
 
 
 def normalize_time(value):
-    """
-    Normalize HH:MM and HH:MM:SS into HH:MM.
-    """
+    """Normalize HH:MM and HH:MM:SS into HH:MM."""
 
     value = str(value)
 
@@ -122,20 +120,21 @@ def confirm_booking(db, request):
     Final SportSync booking confirmation.
 
     OS ENGINE:
-        Process-local mutex synchronization.
+        Facility-specific mutex.
+        Equipment-specific mutex.
 
     DBMS ENGINE:
-        Global campus row locking.
-        Facility and equipment row locking.
         READ COMMITTED isolation.
+        Facility row locking.
+        Equipment row locking.
         Duplicate request prevention.
         Atomic transaction.
 
-    CAMPUS-WIDE RULE:
-        A confirmed booking blocks overlapping
-        time intervals across the entire campus.
-
-    Only Confirmed bookings block availability.
+    BOOKING RULES:
+        Different facilities can be booked at the same time.
+        The same facility cannot have overlapping confirmed bookings.
+        Shared equipment stock is checked across all facilities.
+        Only Confirmed bookings block availability.
     """
 
     try:
@@ -171,7 +170,6 @@ def confirm_booking(db, request):
                     "message": f"Missing required field: {field}"
                 }
 
-        # Normalize times
         start_time = normalize_time(request["start_time"])
         end_time = normalize_time(request["end_time"])
 
@@ -197,14 +195,11 @@ def confirm_booking(db, request):
         # STEP 2: OS MUTEX SYNCHRONIZATION
         # ==========================================
 
-        # Use one common campus mutex rather than
-        # separate mutexes for exact time intervals.
-        #
-        # This serializes campus booking operations
-        # within this Python application process.
+        # No campus-global mutex.
+        # Different facilities can process bookings concurrently.
+        # Requests sharing a facility or equipment are synchronized.
 
         resource_ids = [
-            "campus-global-booking",
             "facility:" + str(request["facility_id"]),
             "equipment:" + str(request["equipment_id"])
         ]
@@ -222,34 +217,7 @@ def confirm_booking(db, request):
             )
 
             # ==========================================
-            # STEP 4: GLOBAL CAMPUS DATABASE LOCK
-            # ==========================================
-
-            # Every confirmation transaction must lock
-            # the same permanent database row.
-            #
-            # The lock remains held until COMMIT or ROLLBACK.
-            # It coordinates separate application processes.
-
-            campus_lock = db.execute(
-                text("""
-                    SELECT lock_id
-                    FROM campus_booking_lock
-                    WHERE lock_id = 1
-                    FOR UPDATE
-                """)
-            ).first()
-
-            if campus_lock is None:
-                db.rollback()
-
-                return {
-                    "success": False,
-                    "message": "Campus booking lock is not configured."
-                }
-
-            # ==========================================
-            # STEP 5: DUPLICATE REQUEST CHECK
+            # STEP 4: DUPLICATE REQUEST CHECK
             # ==========================================
 
             existing = get_existing_booking(
@@ -271,7 +239,7 @@ def confirm_booking(db, request):
                 return result
 
             # ==========================================
-            # STEP 6: VALIDATE USER
+            # STEP 5: VALIDATE USER
             # ==========================================
 
             user = db.execute(
@@ -294,7 +262,7 @@ def confirm_booking(db, request):
                 }
 
             # ==========================================
-            # STEP 7: LOCK AND VALIDATE FACILITY
+            # STEP 6: LOCK AND VALIDATE FACILITY
             # ==========================================
 
             facility = db.execute(
@@ -355,8 +323,12 @@ def confirm_booking(db, request):
                 }
 
             # ==========================================
-            # STEP 8: LOCK SELECTED TIMESLOT
+            # STEP 7: VALIDATE BASE TIMESLOT
             # ==========================================
+
+            # This is a read-only check.
+            # Do not lock a campus-wide timeslot row:
+            # unrelated facilities may use the same time.
 
             slot = db.execute(
                 text("""
@@ -367,7 +339,6 @@ def confirm_booking(db, request):
                       AND end_time >= :end_time
                       AND LOWER(availability_status) = 'available'
                     LIMIT 1
-                    FOR UPDATE
                 """),
                 {
                     "booking_date": request["booking_date"],
@@ -385,33 +356,30 @@ def confirm_booking(db, request):
                 }
 
             # ==========================================
-            # STEP 9: CAMPUS-WIDE AVAILABILITY CHECK
+            # STEP 8: FACILITY-SPECIFIC AVAILABILITY
             # ==========================================
 
-            # This check occurs after acquiring the global
-            # database lock, so a previous confirmation
-            # cannot be missed.
-
-            campus_available = is_campus_time_available(
+            facility_available = is_facility_time_available(
                 db,
+                request["facility_id"],
                 request["booking_date"],
                 start_time,
                 end_time
             )
 
-            if not campus_available:
+            if not facility_available:
                 db.rollback()
 
                 return {
                     "success": False,
                     "message": (
-                        "This campus-wide timeslot has already "
-                        "been booked. Please select another slot."
+                        "This facility is already booked "
+                        "during the selected time."
                     )
                 }
 
             # ==========================================
-            # STEP 10: LOCK AND VALIDATE EQUIPMENT
+            # STEP 9: LOCK AND VALIDATE EQUIPMENT
             # ==========================================
 
             equipment = db.execute(
@@ -459,7 +427,7 @@ def confirm_booking(db, request):
                 }
 
             # ==========================================
-            # STEP 11: DETECT RESOURCE CONFLICTS
+            # STEP 10: DETECT RESOURCE CONFLICTS
             # ==========================================
 
             conflicts = detect_conflicts(
@@ -484,7 +452,7 @@ def confirm_booking(db, request):
                 }
 
             # ==========================================
-            # STEP 12: CALCULATE DURATION
+            # STEP 11: CALCULATE DURATION
             # ==========================================
 
             start = datetime.strptime(
@@ -512,13 +480,13 @@ def confirm_booking(db, request):
                 }
 
             # ==========================================
-            # STEP 13: GENERATE BOOKING ID
+            # STEP 12: GENERATE BOOKING ID
             # ==========================================
 
             booking_id = str(uuid4())
 
             # ==========================================
-            # STEP 14: INSERT CONFIRMED BOOKING
+            # STEP 13: INSERT CONFIRMED BOOKING
             # ==========================================
 
             db.execute(
@@ -579,7 +547,7 @@ def confirm_booking(db, request):
             )
 
             # ==========================================
-            # STEP 15: COMMIT TRANSACTION
+            # STEP 14: COMMIT TRANSACTION
             # ==========================================
 
             db.commit()

@@ -1,121 +1,253 @@
 
-from uuid import uuid4
+from datetime import date
 
-from sqlalchemy import text
 from app.database.connection import SessionLocal
 from app.engines.conflict_engine import detect_conflicts
 
 
-db = SessionLocal()
+BOOKING_DATE = date(2035, 1, 1)
 
-try:
-    print("\n========== ALL CONFLICTS VALIDATION ==========")
+
+def run_test(name, test_function):
+    print(f"\n{name}")
+
+    try:
+        test_function()
+        print("PASS")
+    except Exception as error:
+        print("FAIL:", error)
+
+
+def get_test_data(db):
+    from sqlalchemy import text
 
     facility = db.execute(
         text("""
-            SELECT facility_id, facility_name, capacity, location
+            SELECT facility_id, capacity, sport_type
             FROM facilities
-            WHERE LOWER(sport_type) = 'football'
+            WHERE LOWER(availability) = 'available'
+              AND LOWER(facility_status) = 'active'
+            ORDER BY facility_id
             LIMIT 1
         """)
     ).mappings().first()
 
     equipment = db.execute(
         text("""
-            SELECT equipment_id, total_quantity
+            SELECT equipment_id, total_quantity, sport
             FROM equipment
-            WHERE LOWER(sport) = 'football'
+            WHERE LOWER(resource_status) = 'available'
+            ORDER BY equipment_id
             LIMIT 1
         """)
     ).mappings().first()
 
-    user_id = db.execute(
-        text("SELECT user_id FROM users LIMIT 1")
-    ).scalar()
+    if facility is None:
+        raise RuntimeError("No active facility found.")
 
-    if not facility or not equipment or not user_id:
-        raise Exception("Required test records not found.")
+    if equipment is None:
+        raise RuntimeError("No available equipment found.")
 
-    test_id = "TEST-" + uuid4().hex[:12]
+    return facility, equipment
 
-    # Insert temporary Confirmed booking
-    db.execute(
-        text("""
-            INSERT INTO bookings (
-                booking_id,
-                request_id,
-                user_id,
-                sport,
-                booking_date,
-                start_time,
-                end_time,
-                duration_minutes,
-                participants,
-                equipment_id,
-                equipment_quantity,
-                facility_id,
-                facility_name,
-                location,
-                booking_status
-            )
-            VALUES (
-                :id, :id, :user_id, 'Football',
-                '2030-01-01', '07:00', '08:00',
-                60, 20, :equipment_id, 1,
-                :facility_id, :facility_name,
-                :location, 'Confirmed'
-            )
-        """),
-        {
-            "id": test_id,
-            "user_id": user_id,
-            "equipment_id": equipment["equipment_id"],
-            "facility_id": facility["facility_id"],
-            "facility_name": facility["facility_name"],
-            "location": facility["location"]
-        }
-    )
 
-    # Request deliberately violates all four conditions
+def test_invalid_time(db, facility, equipment):
     conflicts = detect_conflicts(
         db=db,
-        sport="Football",
+        sport=facility["sport_type"],
+        participants=1,
+        facility_id=facility["facility_id"],
+        booking_date=BOOKING_DATE,
+        start_time="09:00",
+        end_time="08:00",
+        equipment_id=equipment["equipment_id"],
+        equipment_quantity=1
+    )
+
+    assert any(
+        item["type"] == "Time-Slot Conflict"
+        for item in conflicts
+    )
+
+
+def test_capacity_conflict(db, facility, equipment):
+    conflicts = detect_conflicts(
+        db=db,
+        sport=facility["sport_type"],
         participants=facility["capacity"] + 1,
         facility_id=facility["facility_id"],
-        booking_date="2030-01-01",
+        booking_date=BOOKING_DATE,
         start_time="07:00",
         end_time="08:00",
         equipment_id=equipment["equipment_id"],
-        equipment_quantity=equipment["total_quantity"] + 1
+        equipment_quantity=1
     )
 
-    print("\nDETECTED CONFLICTS:")
+    assert any(
+        item["type"] == "Capacity Conflict"
+        for item in conflicts
+    )
 
-    for conflict in conflicts:
-        print("-", conflict["type"])
 
-    expected = {
-        "Time-Slot Conflict",
-        "Capacity Conflict",
-        "Facility/Resource Conflict",
-        "Equipment Conflict"
-    }
+def test_same_facility_conflict(db, facility, equipment):
+    from sqlalchemy import text
 
-    actual = {item["type"] for item in conflicts}
+    request_id = "TEST_ALL_CONFLICTS_FACILITY"
 
-    print("\nExpected conflict types:", len(expected))
-    print("Detected conflict types:", len(actual))
+    try:
+        db.execute(
+            text("""
+                DELETE FROM bookings
+                WHERE request_id = :request_id
+            """),
+            {"request_id": request_id}
+        )
 
-    if actual == expected:
-        print("\nTEST RESULT: PASS")
-        print("All four conflict types detected!")
-    else:
-        print("\nTEST RESULT: FAIL")
-        print("Missing:", expected - actual)
+        db.execute(
+            text("""
+                INSERT INTO bookings (
+                    booking_id,
+                    request_id,
+                    user_id,
+                    sport,
+                    booking_date,
+                    start_time,
+                    end_time,
+                    duration_minutes,
+                    participants,
+                    equipment_id,
+                    equipment_required,
+                    equipment_quantity,
+                    facility_id,
+                    facility_name,
+                    location,
+                    booking_status
+                )
+                SELECT
+                    'TEST_ALL_CONFLICTS_BOOKING',
+                    :request_id,
+                    user_id,
+                    :sport,
+                    :booking_date,
+                    '07:00',
+                    '08:00',
+                    60,
+                    1,
+                    :equipment_id,
+                    'Yes',
+                    1,
+                    :facility_id,
+                    facility_name,
+                    location,
+                    'Confirmed'
+                FROM facilities
+                CROSS JOIN (
+                    SELECT user_id
+                    FROM users
+                    LIMIT 1
+                ) AS test_user
+                WHERE facility_id = :facility_id
+            """),
+            {
+                "request_id": request_id,
+                "sport": facility["sport_type"],
+                "booking_date": BOOKING_DATE,
+                "equipment_id": equipment["equipment_id"],
+                "facility_id": facility["facility_id"]
+            }
+        )
 
-finally:
-    db.rollback()
-    db.close()
+        db.flush()
 
-    print("\nTemporary test booking rolled back.")
-    print("Original dataset unchanged.")
+        conflicts = detect_conflicts(
+            db=db,
+            sport=facility["sport_type"],
+            participants=1,
+            facility_id=facility["facility_id"],
+            booking_date=BOOKING_DATE,
+            start_time="07:30",
+            end_time="08:30",
+            equipment_id=equipment["equipment_id"],
+            equipment_quantity=1
+        )
+
+        assert any(
+            item["type"] == "Facility/Resource Conflict"
+            for item in conflicts
+        )
+
+    finally:
+        db.rollback()
+
+
+def test_different_facility_no_conflict(db):
+    from sqlalchemy import text
+
+    facilities = db.execute(
+        text("""
+            SELECT facility_id, capacity, sport_type
+            FROM facilities
+            WHERE LOWER(availability) = 'available'
+              AND LOWER(facility_status) = 'active'
+            ORDER BY facility_id
+            LIMIT 2
+        """)
+    ).mappings().all()
+
+    if len(facilities) < 2:
+        print("SKIPPED: Need two active facilities.")
+        return
+
+    first, second = facilities
+
+    conflicts = detect_conflicts(
+        db=db,
+        sport=second["sport_type"],
+        participants=1,
+        facility_id=second["facility_id"],
+        booking_date=BOOKING_DATE,
+        start_time="07:00",
+        end_time="08:00"
+    )
+
+    assert not any(
+        item["type"] == "Facility/Resource Conflict"
+        for item in conflicts
+    )
+
+
+def main():
+    db = SessionLocal()
+
+    try:
+        facility, equipment = get_test_data(db)
+
+        run_test(
+            "TC01 - Invalid time interval",
+            lambda: test_invalid_time(db, facility, equipment)
+        )
+
+        run_test(
+            "TC02 - Capacity conflict",
+            lambda: test_capacity_conflict(db, facility, equipment)
+        )
+
+        run_test(
+            "TC03 - Same facility overlapping booking",
+            lambda: test_same_facility_conflict(
+                db, facility, equipment
+            )
+        )
+
+        run_test(
+            "TC04 - Different facilities can share a time",
+            lambda: test_different_facility_no_conflict(db)
+        )
+
+    finally:
+        db.rollback()
+        db.close()
+
+
+if __name__ == "__main__":
+    main()

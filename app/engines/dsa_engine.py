@@ -8,6 +8,10 @@ from app.engines.filtering_engine import (
 )
 
 
+# ==========================================
+# 1. GET SUITABLE FACILITIES
+# ==========================================
+
 def get_suitable_facilities(db, sport, participants):
     """
     Step 1: Filter facilities by sport.
@@ -29,38 +33,66 @@ def get_suitable_facilities(db, sport, participants):
     return capacity_facilities
 
 
-def get_free_time_slots(db, booking_date):
+# ==========================================
+# 2. GET FREE TIME SLOTS FOR A FACILITY
+# ==========================================
+
+def get_free_time_slots(
+    db,
+    booking_date,
+    facility_id=None,
+    start_time=None,
+    end_time=None
+):
     """
-    Return only free campus-wide timeslots.
+    Return available timeslots.
+
+    When facility_id is provided, overlapping
+    confirmed bookings at that facility are excluded.
+
+    Different facilities can use the same timeslot.
     """
 
     return get_available_time_slots(
-        db,
-        booking_date
+        db=db,
+        booking_date=booking_date,
+        start_time=start_time,
+        end_time=end_time,
+        facility_id=facility_id
     )
 
+
+# ==========================================
+# 3. GET AVAILABLE EQUIPMENT
+# ==========================================
 
 def get_available_equipment(
     db,
     sport,
     booking_date,
     start_time,
-    end_time
+    end_time,
+    equipment_quantity=1
 ):
     """
-    Return compatible equipment for the selected sport
-    and timeslot. Quantity is selected by the user later.
+    Return compatible equipment.
+
+    Equipment stock is shared across all facilities.
     """
 
     return filter_by_equipment(
         db=db,
         sport=sport,
-        required_quantity=1,
+        required_quantity=equipment_quantity,
         booking_date=booking_date,
         start_time=start_time,
         end_time=end_time
     )
 
+
+# ==========================================
+# 4. FIND FEASIBLE BOOKING OPTIONS
+# ==========================================
 
 def find_feasible_options(
     db,
@@ -72,15 +104,40 @@ def find_feasible_options(
     equipment_quantity=1
 ):
     """
-    Complete filtering:
-    SPORT -> PARTICIPANTS -> FACILITY
-    -> TIMESLOT -> EQUIPMENT -> QUANTITY
+    Progressive filtering:
 
-    Does not automatically book or select resources.
+    SPORT
+       |
+    PARTICIPANTS
+       |
+    FACILITY
+       |
+    FACILITY-SPECIFIC TIMESLOT
+       |
+    SHARED EQUIPMENT
+       |
+    FEASIBLE OPTIONS
+
+    This function does not automatically book
+    or select resources.
     """
 
     if start_time >= end_time:
-        raise ValueError("End time must be after start time.")
+        raise ValueError(
+            "End time must be after start time."
+        )
+
+    if participants <= 0:
+        raise ValueError(
+            "Participants must be greater than zero."
+        )
+
+    if equipment_quantity <= 0:
+        raise ValueError(
+            "Equipment quantity must be greater than zero."
+        )
+
+    # STEP 1: Filter facilities by sport and capacity
 
     facilities = get_suitable_facilities(
         db,
@@ -88,34 +145,42 @@ def find_feasible_options(
         participants
     )
 
-    available_slots = get_available_time_slots(
-        db,
-        booking_date,
-        start_time,
-        end_time
-    )
-
-    if not available_slots:
+    if not facilities:
         return []
 
-    equipment_options = filter_by_equipment(
-        db,
-        sport,
-        equipment_quantity,
-        booking_date,
-        start_time,
-        end_time
+    # STEP 2: Filter each facility by its own availability
+
+    equipment_options = get_available_equipment(
+        db=db,
+        sport=sport,
+        booking_date=booking_date,
+        start_time=start_time,
+        end_time=end_time,
+        equipment_quantity=equipment_quantity
     )
 
-    if not facilities or not equipment_options:
+    if not equipment_options:
         return []
 
-    return [
-        {
+    feasible_options = []
+
+    for facility in facilities:
+
+        available_slots = get_free_time_slots(
+            db=db,
+            booking_date=booking_date,
+            facility_id=facility["facility_id"],
+            start_time=start_time,
+            end_time=end_time
+        )
+
+        if not available_slots:
+            continue
+
+        feasible_options.append({
             "facility": facility,
             "equipment_options": equipment_options,
             "available_time_slots": available_slots
-        }
-        for facility in facilities
-    ]
-          
+        })
+
+    return feasible_options

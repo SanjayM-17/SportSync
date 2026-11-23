@@ -2,8 +2,12 @@
 from sqlalchemy import text
 
 
-# 1. Get active and available facilities
+# ==========================================
+# 1. GET ACTIVE AND AVAILABLE FACILITIES
+# ==========================================
+
 def get_available_facilities(db):
+
     query = text("""
         SELECT
             facility_id,
@@ -17,6 +21,7 @@ def get_available_facilities(db):
         FROM facilities
         WHERE LOWER(availability) = 'available'
           AND LOWER(facility_status) = 'active'
+        ORDER BY facility_name
     """)
 
     return [
@@ -25,92 +30,192 @@ def get_available_facilities(db):
     ]
 
 
-# 2. Filter facilities by sport
+# ==========================================
+# 2. FILTER FACILITIES BY SPORT
+# ==========================================
+
 def filter_by_sport(facilities, sport):
+
     return [
-        facility for facility in facilities
+        facility
+        for facility in facilities
         if facility["sport_type"]
         and facility["sport_type"].strip().lower()
         == sport.strip().lower()
     ]
 
 
-# 3. Filter facilities by participant capacity
+# ==========================================
+# 3. FILTER FACILITIES BY CAPACITY
+# ==========================================
+
 def filter_by_capacity(facilities, participants):
+
     if participants <= 0:
-        raise ValueError("Participants must be greater than zero.")
+        raise ValueError(
+            "Participants must be greater than zero."
+        )
 
     return [
-        facility for facility in facilities
-        if facility["capacity"] >= participants
+        facility
+        for facility in facilities
+        if facility["capacity"] is not None
+        and facility["capacity"] >= participants
     ]
 
 
-# 4. Get free campus-wide timeslots
-def get_available_time_slots(
-    db, booking_date, start_time=None, end_time=None
-):
-    query = text("""
-        SELECT
-            t.slot_id,
-            t.`date`,
-            t.start_time,
-            t.end_time,
-            t.time_slot
-        FROM timeslots t
-        WHERE t.`date` = :booking_date
-          AND LOWER(t.availability_status) = 'available'
-          AND NOT EXISTS (
-              SELECT 1
-              FROM bookings b
-              WHERE b.booking_date = t.`date`
-                AND LOWER(b.booking_status) = 'confirmed'
-                AND b.start_time < t.end_time
-                AND b.end_time > t.start_time
-          )
-          AND (
-              :start_time IS NULL
-              OR (
-                  t.start_time <= :start_time
-                  AND t.end_time >= :end_time
-              )
-          )
-        ORDER BY t.start_time
-    """)
+# ==========================================
+# 4. GET AVAILABLE TIME SLOTS
+#    FACILITY-SPECIFIC AVAILABILITY
+# ==========================================
 
-    result = db.execute(
-        query,
-        {
+def get_available_time_slots(
+    db,
+    booking_date,
+    start_time=None,
+    end_time=None,
+    facility_id=None
+):
+    """
+    Return available timeslots.
+
+    Different facilities can use the same timeslot.
+
+    Only confirmed bookings for the selected
+    facility block overlapping timeslots.
+
+    Adjacent bookings are allowed.
+    """
+
+    if (start_time is None) != (end_time is None):
+        raise ValueError(
+            "Both start_time and end_time must be provided."
+        )
+
+    if start_time is not None and start_time >= end_time:
+        raise ValueError(
+            "End time must be after start time."
+        )
+
+    if facility_id is not None:
+
+        query = text("""
+            SELECT
+                t.slot_id,
+                t.`date`,
+                t.start_time,
+                t.end_time,
+                t.time_slot
+            FROM timeslots t
+            WHERE t.`date` = :booking_date
+              AND LOWER(t.availability_status) = 'available'
+
+              AND (
+                    :start_time IS NULL
+                    OR (
+                        TIME(t.start_time) <= TIME(:start_time)
+                        AND TIME(t.end_time) >= TIME(:end_time)
+                    )
+              )
+
+              AND NOT EXISTS (
+                    SELECT 1
+                    FROM bookings b
+                    WHERE b.facility_id = :facility_id
+                      AND b.booking_date = t.`date`
+                      AND LOWER(b.booking_status) = 'confirmed'
+                      AND TIME(b.start_time) < TIME(t.end_time)
+                      AND TIME(b.end_time) > TIME(t.start_time)
+              )
+
+            ORDER BY TIME(t.start_time)
+        """)
+
+        params = {
+            "booking_date": booking_date,
+            "facility_id": facility_id,
+            "start_time": start_time,
+            "end_time": end_time
+        }
+
+    else:
+
+        query = text("""
+            SELECT
+                t.slot_id,
+                t.`date`,
+                t.start_time,
+                t.end_time,
+                t.time_slot
+            FROM timeslots t
+            WHERE t.`date` = :booking_date
+              AND LOWER(t.availability_status) = 'available'
+
+              AND (
+                    :start_time IS NULL
+                    OR (
+                        TIME(t.start_time) <= TIME(:start_time)
+                        AND TIME(t.end_time) >= TIME(:end_time)
+                    )
+              )
+
+            ORDER BY TIME(t.start_time)
+        """)
+
+        params = {
             "booking_date": booking_date,
             "start_time": start_time,
             "end_time": end_time
         }
-    )
 
-    return [dict(row) for row in result.mappings()]
+    result = db.execute(query, params)
+
+    return [
+        dict(row)
+        for row in result.mappings()
+    ]
 
 
-# 5. Filter facilities by campus-wide timeslot availability
+# ==========================================
+# 5. FILTER FACILITIES BY TIME SLOT
+# ==========================================
+
 def filter_by_time_slot(
-    db, facilities, booking_date, start_time, end_time
+    db,
+    facilities,
+    booking_date,
+    start_time,
+    end_time
 ):
+
     if start_time >= end_time:
-        raise ValueError("End time must be after start time.")
+        raise ValueError(
+            "End time must be after start time."
+        )
 
-    available_slots = get_available_time_slots(
-        db,
-        booking_date,
-        start_time,
-        end_time
-    )
+    available_facilities = []
 
-    if not available_slots:
-        return []
+    for facility in facilities:
 
-    return facilities
+        slots = get_available_time_slots(
+            db=db,
+            booking_date=booking_date,
+            start_time=start_time,
+            end_time=end_time,
+            facility_id=facility["facility_id"]
+        )
+
+        if slots:
+            available_facilities.append(facility)
+
+    return available_facilities
 
 
-# 6. Filter equipment by sport and available quantity
+# ==========================================
+# 6. FILTER EQUIPMENT BY SPORT AND QUANTITY
+#    SHARED CAMPUS-WIDE EQUIPMENT STOCK
+# ==========================================
+
 def filter_by_equipment(
     db,
     sport,
@@ -119,8 +224,25 @@ def filter_by_equipment(
     start_time=None,
     end_time=None
 ):
+
     if required_quantity <= 0:
-        raise ValueError("Equipment quantity must be greater than zero.")
+        raise ValueError(
+            "Equipment quantity must be greater than zero."
+        )
+
+    if (
+        booking_date is None
+        or start_time is None
+        or end_time is None
+    ):
+        raise ValueError(
+            "Booking date, start time and end time are required."
+        )
+
+    if start_time >= end_time:
+        raise ValueError(
+            "End time must be after start time."
+        )
 
     query = text("""
         SELECT
@@ -130,6 +252,7 @@ def filter_by_equipment(
             e.sport,
             e.total_quantity,
             e.resource_status,
+
             (
                 e.total_quantity -
                 COALESCE((
@@ -138,14 +261,18 @@ def filter_by_equipment(
                     WHERE b.equipment_id = e.equipment_id
                       AND b.booking_date = :booking_date
                       AND LOWER(b.booking_status) = 'confirmed'
-                      AND b.start_time < :end_time
-                      AND b.end_time > :start_time
+                      AND TIME(b.start_time) < TIME(:end_time)
+                      AND TIME(b.end_time) > TIME(:start_time)
                 ), 0)
             ) AS available_quantity
+
         FROM equipment e
+
         WHERE LOWER(e.sport) = LOWER(:sport)
           AND LOWER(e.resource_status) = 'available'
+
         HAVING available_quantity >= :required_quantity
+
         ORDER BY e.equipment_name
     """)
 
@@ -160,4 +287,7 @@ def filter_by_equipment(
         }
     )
 
-    return [dict(row) for row in result.mappings()]
+    return [
+        dict(row)
+        for row in result.mappings()
+    ]

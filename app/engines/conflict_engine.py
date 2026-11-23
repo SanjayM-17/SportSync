@@ -2,17 +2,19 @@
 from sqlalchemy import text
 
 
-def is_campus_time_available(
+def is_facility_time_available(
     db,
+    facility_id,
     booking_date,
     start_time,
     end_time
 ):
     """
-    Check whether the requested time interval is free
-    across the entire campus.
+    Check availability for the selected facility only.
 
+    Different facilities may have simultaneous bookings.
     Only Confirmed bookings block availability.
+    Adjacent intervals are allowed.
     """
 
     if start_time >= end_time:
@@ -21,15 +23,17 @@ def is_campus_time_available(
     query = text("""
         SELECT COUNT(*)
         FROM bookings
-        WHERE booking_date = :booking_date
+        WHERE facility_id = :facility_id
+          AND booking_date = :booking_date
           AND LOWER(booking_status) = 'confirmed'
-          AND start_time < :end_time
-          AND end_time > :start_time
+          AND TIME(start_time) < TIME(:end_time)
+          AND TIME(end_time) > TIME(:start_time)
     """)
 
     count = db.execute(
         query,
         {
+            "facility_id": facility_id,
             "booking_date": booking_date,
             "start_time": start_time,
             "end_time": end_time
@@ -51,28 +55,34 @@ def detect_conflicts(
     equipment_quantity=0
 ):
     """
-    Detect resource conflicts.
+    Detect booking conflicts.
 
-    Time-slot availability is handled separately through
-    is_campus_time_available().
-
-    Conflict types:
     1. Capacity Conflict
     2. Facility/Resource Conflict
     3. Equipment Conflict
+
+    Facility conflicts are facility-specific.
+    Equipment stock is shared across all facilities.
+    Only Confirmed bookings block availability.
     """
 
     conflicts = []
 
-    # 1. CAPACITY CONFLICT
-    capacity_query = text("""
-        SELECT capacity
-        FROM facilities
-        WHERE facility_id = :facility_id
-    """)
+    # Validate the requested interval first.
+    if start_time >= end_time:
+        conflicts.append({
+            "type": "Time-Slot Conflict",
+            "message": "End time must be after start time."
+        })
+        return conflicts
 
+    # 1. Capacity conflict
     capacity = db.execute(
-        capacity_query,
+        text("""
+            SELECT capacity
+            FROM facilities
+            WHERE facility_id = :facility_id
+        """),
         {"facility_id": facility_id}
     ).scalar()
 
@@ -82,54 +92,38 @@ def detect_conflicts(
             "message": "Facility capacity is insufficient."
         })
 
-    # 2. FACILITY/RESOURCE CONFLICT
-    facility_query = text("""
-        SELECT COUNT(*)
-        FROM bookings
-        WHERE facility_id = :facility_id
-          AND booking_date = :booking_date
-          AND LOWER(booking_status) = 'confirmed'
-          AND start_time < :end_time
-          AND end_time > :start_time
-    """)
-
-    facility_conflicts = db.execute(
-        facility_query,
-        {
-            "facility_id": facility_id,
-            "booking_date": booking_date,
-            "start_time": start_time,
-            "end_time": end_time
-        }
-    ).scalar()
-
-    if facility_conflicts > 0:
+    # 2. Facility-specific time conflict
+    if not is_facility_time_available(
+        db=db,
+        facility_id=facility_id,
+        booking_date=booking_date,
+        start_time=start_time,
+        end_time=end_time
+    ):
         conflicts.append({
             "type": "Facility/Resource Conflict",
             "message": "Facility is already booked during this time."
         })
 
-    # 3. EQUIPMENT CONFLICT
+    # 3. Shared equipment conflict
     if equipment_id and equipment_quantity > 0:
 
-        equipment_query = text("""
-            SELECT
-                e.total_quantity,
-                COALESCE(SUM(b.equipment_quantity), 0)
-                    AS reserved_quantity
-            FROM equipment e
-            LEFT JOIN bookings b
-                ON b.equipment_id = e.equipment_id
-                AND b.booking_date = :booking_date
-                AND LOWER(b.booking_status) = 'confirmed'
-                AND b.start_time < :end_time
-                AND b.end_time > :start_time
-            WHERE e.equipment_id = :equipment_id
-            GROUP BY e.equipment_id, e.total_quantity
-        """)
-
         equipment = db.execute(
-            equipment_query,
+            text("""
+                SELECT
+                    e.total_quantity,
+                    COALESCE(SUM(b.equipment_quantity), 0)
+                        AS reserved_quantity
+                FROM equipment e
+                LEFT JOIN bookings b
+                    ON b.equipment_id = e.equipment_id
+                    AND b.booking_date = :booking_date
+                    AND LOWER(b.booking_status) = 'confirmed'
+                    AND TIME(b.start_time) < TIME(:end_time)
+                    AND TIME(b.end_time) > TIME(:start_time)
+                WHERE e.equipment_id = :equipment_id
+                GROUP BY e.equipment_id, e.total_quantity
+            """),
             {
                 "equipment_id": equipment_id,
                 "booking_date": booking_date,

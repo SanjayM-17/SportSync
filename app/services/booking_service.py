@@ -1,4 +1,6 @@
 
+from sqlalchemy import text
+
 from app.engines.dsa_engine import (
     get_suitable_facilities,
     get_free_time_slots,
@@ -7,16 +9,18 @@ from app.engines.dsa_engine import (
 
 from app.engines.conflict_engine import (
     detect_conflicts,
-    is_campus_time_available
+    is_facility_time_available
 )
 
 from app.engines.recommendation_engine import recommend_options
 
 
-def get_sports(db):
-    """Step 1: Return available sports."""
+# ==========================================
+# 1. GET AVAILABLE SPORTS
+# ==========================================
 
-    from sqlalchemy import text
+def get_sports(db):
+    """Return available sports."""
 
     query = text("""
         SELECT DISTINCT sport_type
@@ -32,8 +36,12 @@ def get_sports(db):
     ]
 
 
+# ==========================================
+# 2. GET SUITABLE FACILITIES
+# ==========================================
+
 def get_facilities(db, sport, participants):
-    """Steps 2 and 3: Return suitable facilities."""
+    """Return facilities matching sport and capacity."""
 
     return get_suitable_facilities(
         db,
@@ -42,45 +50,86 @@ def get_facilities(db, sport, participants):
     )
 
 
-def get_timeslots(db, booking_date):
-    """Step 4: Return free campus-wide timeslots."""
+# ==========================================
+# 3. GET AVAILABLE TIMESLOTS
+# ==========================================
+
+def get_timeslots(
+    db,
+    booking_date,
+    facility_id=None,
+    start_time=None,
+    end_time=None
+):
+    """
+    Return timeslots.
+
+    Pass facility_id to check availability
+    specifically for the selected facility.
+    """
 
     return get_free_time_slots(
-        db,
-        booking_date
+        db=db,
+        booking_date=booking_date,
+        facility_id=facility_id,
+        start_time=start_time,
+        end_time=end_time
     )
 
+
+# ==========================================
+# 4. GET AVAILABLE EQUIPMENT
+# ==========================================
 
 def get_equipment(
     db,
     sport,
     booking_date,
     start_time,
-    end_time
+    end_time,
+    equipment_quantity=1
 ):
-    """Step 5: Return compatible and available equipment."""
+    """Return compatible equipment with shared stock availability."""
 
     return get_available_equipment(
-        db,
-        sport,
-        booking_date,
-        start_time,
-        end_time
+        db=db,
+        sport=sport,
+        booking_date=booking_date,
+        start_time=start_time,
+        end_time=end_time,
+        equipment_quantity=equipment_quantity
     )
 
+
+# ==========================================
+# 5. VALIDATE USER SELECTIONS
+# ==========================================
 
 def get_recommended_options(db, request):
     """
     Validate the user's actual selections.
 
-    SPORT -> PARTICIPANTS -> FACILITY -> TIMESLOT
-    -> EQUIPMENT -> QUANTITY -> REVIEW
+    SPORT
+       |
+    PARTICIPANTS
+       |
+    FACILITY
+       |
+    FACILITY-SPECIFIC TIMESLOT
+       |
+    SHARED EQUIPMENT
+       |
+    QUANTITY
+       |
+    REVIEW
 
     This function validates selections only.
     It does not create a booking.
     """
 
-    # Step 1: Validate selected facility and participant capacity.
+    # ==========================================
+    # STEP 1: VALIDATE FACILITY
+    # ==========================================
 
     facilities = get_suitable_facilities(
         db,
@@ -90,8 +139,10 @@ def get_recommended_options(db, request):
 
     selected_facility = next(
         (
-            facility for facility in facilities
-            if facility["facility_id"] == request["facility_id"]
+            facility
+            for facility in facilities
+            if str(facility["facility_id"])
+            == str(request["facility_id"])
         ),
         None
     )
@@ -99,49 +150,61 @@ def get_recommended_options(db, request):
     if not selected_facility:
         return []
 
-    # Step 2: Validate the selected timeslot.
+    # ==========================================
+    # STEP 2: VALIDATE FACILITY TIMESLOT
+    # ==========================================
 
-    free_slots = get_free_time_slots(
+    if not is_facility_time_available(
         db,
-        request["booking_date"]
-    )
-
-    selected_slot = next(
-    (
-        slot for slot in free_slots
-        if str(slot["start_time"])[:5] == str(request["start_time"])[:5]
-        and str(slot["end_time"])[:5] == str(request["end_time"])[:5]
-    ),
-    None
-)
-
-    if not selected_slot:
-        return []
-
-    # Recheck campus-wide availability.
-
-    if not is_campus_time_available(
-        db,
+        request["facility_id"],
         request["booking_date"],
         request["start_time"],
         request["end_time"]
     ):
         return []
 
-    # Step 3: Validate selected equipment and stock quantity.
+    free_slots = get_free_time_slots(
+        db=db,
+        booking_date=request["booking_date"],
+        facility_id=request["facility_id"],
+        start_time=request["start_time"],
+        end_time=request["end_time"]
+    )
+
+    selected_slot = next(
+        (
+            slot
+            for slot in free_slots
+            if str(slot["start_time"])[:5]
+            <= str(request["start_time"])[:5]
+            and str(slot["end_time"])[:5]
+            >= str(request["end_time"])[:5]
+        ),
+        None
+    )
+
+    if not selected_slot:
+        return []
+
+    # ==========================================
+    # STEP 3: VALIDATE SHARED EQUIPMENT
+    # ==========================================
 
     equipment_options = get_available_equipment(
-        db,
-        request["sport"],
-        request["booking_date"],
-        request["start_time"],
-        request["end_time"]
+        db=db,
+        sport=request["sport"],
+        booking_date=request["booking_date"],
+        start_time=request["start_time"],
+        end_time=request["end_time"],
+        equipment_quantity=request["equipment_quantity"]
     )
 
     selected_equipment = next(
         (
-            equipment for equipment in equipment_options
-            if equipment["equipment_id"] == request["equipment_id"]
+            equipment
+            for equipment in equipment_options
+            if str(equipment["equipment_id"])
+            == str(request["equipment_id"])
         ),
         None
     )
@@ -156,7 +219,9 @@ def get_recommended_options(db, request):
     ):
         return []
 
-    # Step 4: Run final conflict checks for the selected resources.
+    # ==========================================
+    # STEP 4: FINAL CONFLICT VALIDATION
+    # ==========================================
 
     conflicts = detect_conflicts(
         db=db,
@@ -173,11 +238,14 @@ def get_recommended_options(db, request):
     if conflicts:
         return []
 
-    # Step 5: Return only the user's selected facility and equipment.
+    # ==========================================
+    # STEP 5: RETURN SELECTED OPTIONS
+    # ==========================================
 
     feasible_options = [{
         "facility": selected_facility,
-        "equipment_options": [selected_equipment]
+        "equipment_options": [selected_equipment],
+        "available_time_slots": [selected_slot]
     }]
 
     return recommend_options(feasible_options)

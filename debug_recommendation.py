@@ -8,7 +8,7 @@ from app.engines.dsa_engine import (
 )
 
 from app.engines.conflict_engine import (
-    is_campus_time_available,
+    is_facility_time_available,
     detect_conflicts
 )
 
@@ -29,45 +29,66 @@ try:
     facilities = get_suitable_facilities(
         db, sport, participants
     )
+
     print("Facilities:", facilities)
 
     selected_facility = next(
-        (f for f in facilities if f["facility_id"] == facility_id),
+        (
+            f for f in facilities
+            if f["facility_id"] == facility_id
+        ),
         None
     )
+
     print("Selected facility:", selected_facility)
 
-    print("\n2. TIMESLOT VALIDATION")
+    print("\n2. FACILITY-SPECIFIC TIMESLOT VALIDATION")
 
-    slots = get_free_time_slots(db, booking_date)
-    print("Number of free slots:", len(slots))
+    slots = get_free_time_slots(
+        db,
+        booking_date,
+        facility_id=facility_id
+    )
+
+    print("Number of available slots:", len(slots))
 
     for slot in slots:
-        if "10" in str(slot.get("start_time")):
-            print("Matching slot:", slot)
+        print("Available slot:", slot)
 
     selected_slot = next(
         (
             slot for slot in slots
-            if str(slot["start_time"]) == start_time
-            and str(slot["end_time"]) == end_time
+            if str(slot["start_time"])[:5] == start_time[:5]
+            and str(slot["end_time"])[:5] == end_time[:5]
         ),
         None
     )
+
     print("Selected slot:", selected_slot)
 
-    print("\n3. CAMPUS AVAILABILITY")
+    print("\n3. FACILITY AVAILABILITY")
 
-    campus_available = is_campus_time_available(
-        db, booking_date, start_time, end_time
+    facility_available = is_facility_time_available(
+        db,
+        facility_id,
+        booking_date,
+        start_time,
+        end_time
     )
-    print("Campus available:", campus_available)
+
+    print("Facility available:", facility_available)
 
     print("\n4. EQUIPMENT VALIDATION")
 
     equipment = get_available_equipment(
-        db, sport, booking_date, start_time, end_time
+        db,
+        sport,
+        booking_date,
+        start_time,
+        end_time,
+        equipment_quantity=equipment_quantity
     )
+
     print("Equipment:", equipment)
 
     selected_equipment = next(
@@ -77,11 +98,13 @@ try:
         ),
         None
     )
+
     print("Selected equipment:", selected_equipment)
 
     print("\n5. CONFLICT VALIDATION")
 
     if selected_facility and selected_equipment:
+
         conflicts = detect_conflicts(
             db=db,
             sport=sport,
@@ -93,7 +116,11 @@ try:
             equipment_id=equipment_id,
             equipment_quantity=equipment_quantity
         )
+
         print("Conflicts:", conflicts)
+
+    else:
+        print("Facility or equipment selection is invalid.")
 
 finally:
     db.close()

@@ -8,8 +8,15 @@ def test_successful_booking():
 
     db = SessionLocal()
 
+    request_id = "E2_SUCCESS_TEST_20261123_01"
+
+    print("\n========== BOOKING CONFIRMATION TEST ==========")
+
     try:
+        # STEP 1: Prepare booking request.
+
         request = {
+            "request_id": request_id,
             "user_id": "U0001",
             "sport": "Football",
             "participants": 20,
@@ -21,43 +28,61 @@ def test_successful_booking():
             "equipment_quantity": 5
         }
 
-        print("\n========== BOOKING CONFIRMATION TEST ==========")
-        print("User ID: U0001")
-        print("Facility: F001 - Main Football Ground")
-        print("Equipment: E002 - Football")
-        print("Participants: 20")
-        print("Date: 2018-01-01")
-        print("Time: 07:00 - 08:00")
-        print("Equipment Quantity: 5")
+        print("\nBOOKING REQUEST")
+
+        for key, value in request.items():
+            print(f"{key}: {value}")
+
+        # STEP 2: Confirm booking.
 
         result = confirm_booking(db, request)
 
         print("\n========== RESULT ==========")
         print(result)
 
-        if result["success"]:
+        # STEP 3: Verify result.
+
+        if result.get("success"):
 
             print("\nTEST RESULT: PASS")
+            print("Booking ID:", result["booking_id"])
+            print("Booking Status:", result["booking_status"])
 
+        else:
+            print("\nTEST RESULT: FAIL")
+            print("Reason:", result.get("message"))
+
+            if result.get("error"):
+                print("Error:", result["error"])
+
+    except Exception as error:
+        db.rollback()
+        print("\nTEST EXECUTION ERROR:", error)
+
+    finally:
+        # STEP 4: Remove only this test booking.
+
+        try:
             db.execute(
                 text("""
                     DELETE FROM bookings
-                    WHERE booking_id = :booking_id
+                    WHERE request_id = :request_id
                 """),
-                {"booking_id": result["booking_id"]}
+                {"request_id": request_id}
             )
 
             db.commit()
 
-            print("Temporary test booking deleted.")
+            print("\nTemporary test booking deleted.")
             print("Original dataset preserved.")
 
-        else:
-            print("\nTEST RESULT: FAILED")
-            print("Reason:", result["message"])
+        except Exception as cleanup_error:
+            db.rollback()
+            print("\nCleanup error:", cleanup_error)
 
-    finally:
         db.close()
+
+    print("\nBOOKING CONFIRMATION TEST COMPLETED!")
 
 
 if __name__ == "__main__":

@@ -4,8 +4,13 @@ def recommend_options(feasible_options):
     Rank feasible facility options using best-fit capacity.
 
     Smaller unused capacity is preferred.
-    This only orders recommendations.
-    It does not automatically select or book resources.
+
+    Recommendations are based only on facilities
+    that have passed sport, capacity, time-slot,
+    and equipment filtering.
+
+    This function does not automatically select
+    or book resources.
     """
 
     if not feasible_options:
@@ -20,4 +25,3 @@ def recommend_options(feasible_options):
     )
 
     return recommended
-
